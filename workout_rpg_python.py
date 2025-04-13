@@ -6,6 +6,7 @@ from kivy.uix.progressbar import ProgressBar
 from kivy.uix.popup import Popup
 from kivy.uix.textinput import TextInput
 from kivy.core.window import Window
+from kivy.core.audio import SoundLoader  # Add this import
 from kivy.animation import Animation
 from datetime import datetime
 import json
@@ -19,6 +20,9 @@ class WorkoutRPG(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(orientation='vertical', padding=20, spacing=20, **kwargs)
 
+        # Load the level-up sound
+        self.level_up_sound = SoundLoader.load('level_up_sound.mp3')  # Make sure this file exists
+
         self.stats = {
             'level': 1,
             'exp': 0,
@@ -28,7 +32,11 @@ class WorkoutRPG(BoxLayout):
             'stamina': 0,
             'agility': 0,
             'last_login': str(datetime.now().date()),
-            'total_reps': 0
+            'total_reps': 0,
+            'event_cooldown_triggered': False,
+            'quests': [],
+            'daily_quests': [],
+            'quests_completed': 0
         }
         self.exp_to_level = 100
         self.event_cooldown = 40
@@ -36,6 +44,16 @@ class WorkoutRPG(BoxLayout):
         self.boss_hp = 0
         self.save_file = 'rpg_save.json'
         self.load_progress()
+
+        self.stats.setdefault('daily_quests', [])
+        self.stats.setdefault('quests_completed', 0)
+        self.stats.setdefault('event_cooldown_triggered', False)
+        self.stats.setdefault('quests', [
+            {"task": "Do 20 push-ups", "progress": 0, "goal": 20, "type": "push-ups"},
+            {"task": "Run 15 times", "progress": 0, "goal": 15, "type": "running"},
+            {"task": "Air Bike 10 reps", "progress": 0, "goal": 10, "type": "air bike"}
+        ])
+
         self.apply_daily_decay()
 
         self.status_label = Label(text=self.get_status_text(), font_size=28, size_hint=(1, 0.3), bold=True, color=(0.2, 0.2, 0.2, 1))
@@ -50,6 +68,16 @@ class WorkoutRPG(BoxLayout):
         self.add_widget(self.exp_bar)
         self.add_widget(self.exp_label)
 
+        for quest in self.stats['quests']:
+            self.add_widget(Label(text=f"Quest: {quest['task']} ({quest['progress']}/{quest['goal']})", font_size=20))
+
+        self.add_widget(Label(text="Daily Quests:", font_size=22))
+        self.daily_quest_labels = []
+        for quest in self.stats['daily_quests']:
+            quest_label = Label(text=f"{quest['task']} ({quest['progress']}/{quest['goal']})", font_size=18)
+            self.daily_quest_labels.append(quest_label)
+            self.add_widget(quest_label)
+
         self.add_workout_button("Push-ups", 'strength')
         self.add_workout_button("Running", 'stamina')
         self.add_workout_button("Air Bike", 'agility')
@@ -61,85 +89,38 @@ class WorkoutRPG(BoxLayout):
 
     def add_workout_button(self, label, stat):
         btn = Button(text=label, size_hint=(1, 0.12), font_size=24, background_color=(0.1, 0.4, 0.8, 1))
-        btn.bind(on_press=lambda x: self.animate_button(btn, stat))
+        btn.bind(on_press=lambda x: self.animate_button(btn, stat, label.lower()))
         self.add_widget(btn)
 
-    def animate_button(self, button, stat):
+    def animate_button(self, button, stat, label):
         anim = Animation(size_hint=(1, 0.14), duration=0.1) + Animation(size_hint=(1, 0.12), duration=0.1)
         anim.start(button)
-        self.handle_workout(stat)
+        self.handle_workout(stat, label)
 
-    def handle_workout(self, stat):
-        if self.boss_active:
-            return  # Don't allow workouts during boss fight
-    
+    def handle_workout(self, stat, label):
         self.stats[stat] += 1
         self.stats['exp'] += 1
         self.stats['total_reps'] += 1
+
+        for quest in self.stats['quests']:
+            if quest.get('type') in label:
+                quest['progress'] = min(quest['progress'] + 1, quest['goal'])
+
+        for quest in self.stats['daily_quests']:
+            if quest.get('type') in label:
+                quest['progress'] = min(quest['progress'] + 1, quest['goal'])
+
         if self.stats['exp'] >= self.exp_to_level:
             self.stats['level'] += 1
             self.stats['exp'] = 0
             self.stats['max_hp'] += 1
             self.stats['hp'] = self.stats['max_hp']
-    
-        if self.stats['total_reps'] > self.event_cooldown and not self.boss_active:
-            if random.random() < 0.1:
-                self.trigger_boss_fight()
-                return
-            elif random.random() < 0.15:
-                self.trigger_event()
-    
+
+            # Play the level-up sound
+            if self.level_up_sound:
+                self.level_up_sound.play()
+
         self.update_ui()
-
-    def trigger_boss_fight(self):
-        self.boss_hp = random.randint(10, 30)
-        self.boss_active = True
-        self.ask_for_reps()
-
-    def ask_for_reps(self):
-        layout = BoxLayout(orientation='vertical')
-        layout.add_widget(Label(text=f"Boss appears with {self.boss_hp} HP! How many reps did you do?"))
-        reps_input = TextInput(hint_text='Enter reps', multiline=False, input_filter='int')
-        layout.add_widget(reps_input)
-        submit_btn = Button(text='Submit')
-        layout.add_widget(submit_btn)
-    
-        popup = Popup(title='Boss Fight!', content=layout, size_hint=(0.8, 0.6))
-    
-        def resolve_battle(instance):
-            try:
-                reps = int(reps_input.text)
-                self.boss_hp -= reps
-                if self.boss_hp > 0:
-                    damage = random.randint(5, 15)
-                    self.stats['hp'] = max(0, self.stats['hp'] - damage)
-                    result = f"You dealt {reps} damage. Boss has {self.boss_hp} HP left. You took {damage} damage!"
-                else:
-                    reward = 10
-                    self.stats['exp'] += reward
-                    result = f"You defeated the boss! +{reward} EXP"
-                    self.boss_active = False
-                    self.stats['total_reps'] = 0  # Reset cooldown
-                popup.dismiss()
-                self.update_ui()
-                result_popup = Popup(title='Battle Result', content=Label(text=result), size_hint=(0.7, 0.4))
-                result_popup.open()
-            except ValueError:
-                reps_input.text = ''
-                reps_input.hint_text = 'Enter a valid number'
-    
-        submit_btn.bind(on_press=resolve_battle)
-        popup.open()
-
-    def trigger_event(self):
-        events = ["You found a treasure chest! +5 EXP", "You feel energized! +10 HP"]
-        event = random.choice(events)
-        if "EXP" in event:
-            self.stats['exp'] += 5
-        if "HP" in event:
-            self.stats['hp'] = min(self.stats['max_hp'], self.stats['hp'] + 10)
-        popup = Popup(title='Random Event!', content=Label(text=event), size_hint=(0.7, 0.4))
-        popup.open()
 
     def apply_daily_decay(self):
         today = datetime.now().date()
@@ -148,6 +129,18 @@ class WorkoutRPG(BoxLayout):
             days_passed = (today - last).days
             self.stats['strength'] = max(0, self.stats['strength'] - 5 * days_passed)
             self.stats['last_login'] = str(today)
+            self.generate_daily_quests()
+        elif not self.stats.get('daily_quests'):
+            self.generate_daily_quests()
+
+    def generate_daily_quests(self):
+        options = [
+            {"task": "Do 20 push-ups", "progress": 0, "goal": 20, "type": "push-ups"},
+            {"task": "Run 15 times", "progress": 0, "goal": 15, "type": "running"},
+            {"task": "Air Bike 10 reps", "progress": 0, "goal": 10, "type": "air bike"},
+            {"task": "Do 30 sit-ups", "progress": 0, "goal": 30, "type": "sit-ups"}
+        ]
+        self.stats['daily_quests'] = random.sample(options, 3)
 
     def update_ui(self):
         self.status_label.text = self.get_status_text()
@@ -155,6 +148,12 @@ class WorkoutRPG(BoxLayout):
         self.exp_label.text = f"EXP: {self.stats['exp']}/{self.exp_to_level}"
         self.hp_bar.value = self.stats['hp']
         self.hp_label.text = f"HP: {self.stats['hp']}/{self.stats['max_hp']}"
+
+        for i, quest_label in enumerate(self.daily_quest_labels):
+            quest = self.stats['daily_quests'][i]
+            quest_label.text = f"{quest['task']} ({quest['progress']}/{quest['goal']})"
+            if quest['progress'] >= quest['goal']:
+                quest_label.color = (0.2, 0.8, 0.2, 1)  # green to show completed
 
     def get_status_text(self):
         return (f"Level: {self.stats['level']}\n"
@@ -171,24 +170,7 @@ class WorkoutRPG(BoxLayout):
     def load_progress(self):
         if os.path.exists(self.save_file):
             with open(self.save_file, 'r') as f:
-                saved_data = json.load(f)
-                # Ensure all expected keys exist
-                defaults = {
-                    'level': 1,
-                    'exp': 0,
-                    'hp': 100,
-                    'max_hp': 100,
-                    'strength': 0,
-                    'stamina': 0,
-                    'agility': 0,
-                    'last_login': str(datetime.now().date()),
-                    'total_reps': 0
-                }
-                for key, value in defaults.items():
-                    if key not in saved_data:
-                        saved_data[key] = value
-                self.stats = saved_data
-
+                self.stats.update(json.load(f))
 
 class WorkoutRPGApp(App):
     def build(self):
